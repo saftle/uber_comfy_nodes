@@ -40,13 +40,35 @@ class ControlNetOptionalLoader:
         # Return None or skip the operation if 'None' is selected or no input is provided
         return (None,)
 
+class DiffusersSelector:
+    CATEGORY = 'Suplex'
+    RETURN_TYPES = (folder_paths.get_folder_paths("diffusers"), )
+    RETURN_NAMES = ("model_path",)
+    FUNCTION = "select_model_path"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        paths = []
+        for search_path in folder_paths.get_folder_paths("diffusers"):
+            if os.path.exists(search_path):
+                for root, subdirs, files in os.walk(search_path, followlinks=True):
+                    if "model_index.json" in files:
+                        paths.append(os.path.relpath(root, start=search_path))
+        return {"required": {"model_path": (paths,), }}
+
+    def select_model_path(self, model_path):
+        # This function simply returns the model path that was selected
+        return (model_path,)
+
 # Export node
 NODE_CLASS_MAPPINGS = {
     "ControlNet Selector": ControlNetSelector,
     "ControlNetOptionalLoader": ControlNetOptionalLoader,
+    "DiffusersSelector": DiffusersSelector,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ControlNet Selector": "ControlNet Selector",
     "ControlNetOptionalLoader": "Load Optional ControlNet Model",
+    "DiffusersSelector": "Diffusers Selector",
 }
