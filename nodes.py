@@ -1,6 +1,7 @@
 import folder_paths
 from folder_paths import get_filename_list
 import comfy
+import os
 
 class ControlNetSelector:
     @classmethod
