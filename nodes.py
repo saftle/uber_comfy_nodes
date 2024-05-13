@@ -11,7 +11,7 @@ class ControlNetSelector:
             }
         }
     
-    RETURN_TYPES = ("STRING",)
+    RETURN_TYPES = (folder_paths.get_filename_list("controlnet"), )
     RETURN_NAMES = ("control_net_name",)
     FUNCTION = "get_control_net_name"
     
@@ -39,8 +39,6 @@ class ControlNetOptionalLoader:
             return (controlnet,)
         # Return None or skip the operation if 'None' is selected or no input is provided
         return (None,)
-
-
 
 # Export node
 NODE_CLASS_MAPPINGS = {
