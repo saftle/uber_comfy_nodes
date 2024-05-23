@@ -1,0 +1,14 @@
+[project]
+name = "suplex_comfy_nodes"
+description = "Misc Nodes: ControlNet Selector Node, Load Optional ControlNet Model"
+version = "1.0.0"
+license = "LICENSE"
+
+[project.urls]
+Repository = "https://github.com/saftle/suplex_comfy_nodes"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = ""
+DisplayName = "suplex_comfy_nodes"
+Icon = ""
