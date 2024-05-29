@@ -1,3 +1,9 @@
+from nodes import SaveImage
+import json
+from PIL import Image
+import numpy as np
+from PIL.PngImagePlugin import PngInfo
+from comfy.cli_args import args
 import folder_paths
 from folder_paths import get_filename_list
 import comfy
@@ -61,15 +67,63 @@ class DiffusersSelector:
         # This function simply returns the model path that was selected
         return (model_path,)
 
+class SaveImageJPGNoMeta(SaveImage):
+    @classmethod
+    def INPUT_TYPES(s):
+        output = {
+            "required": {
+                "images": ("IMAGE",),
+                "filename_prefix": ("STRING", {"default": "ComfyUI"}),
+                "quality": ("INT", {"default": 100, "min": 1, "max": 100, "step": 1}),
+            },
+        }
+
+        return output
+
+    RETURN_TYPES = ()
+
+    FUNCTION = "save_images"
+
+    CATEGORY = "image"
+
+    def save_images(
+        self,
+        images,
+        filename_prefix="ComfyUI",
+        format="jpeg",
+        quality=92,
+    ):
+        filename_prefix += self.prefix_append
+        full_output_folder, filename, counter, subfolder, filename_prefix = (
+            folder_paths.get_save_image_path(
+                filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0]
+            )
+        )
+        results = list()
+        for batch_number, image in enumerate(images):
+            i = 255.0 * image.cpu().numpy()
+            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+            filename_with_batch_num = filename.replace("%batch_num%", str(batch_number))
+            file = f"{filename_with_batch_num}_{counter:05}_.{format}"
+            results.append(
+                {"filename": file, "subfolder": subfolder, "type": self.type}
+            )
+            counter += 1
+        
+        img.save(os.path.join(full_output_folder, file), quality=quality, optimize=True)
+        return {"ui": {"images": results}}
+
 # Export node
 NODE_CLASS_MAPPINGS = {
     "ControlNet Selector": ControlNetSelector,
     "ControlNetOptionalLoader": ControlNetOptionalLoader,
     "DiffusersSelector": DiffusersSelector,
+    "SaveImageJPGNoMeta": SaveImageJPGNoMeta,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ControlNet Selector": "ControlNet Selector",
     "ControlNetOptionalLoader": "Load Optional ControlNet Model",
     "DiffusersSelector": "Diffusers Selector",
+    "SaveImageJPGNoMeta": "Save Image JPG No Meta",
 }
