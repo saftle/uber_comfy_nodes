@@ -3,9 +3,9 @@ import json
 from PIL import Image
 import numpy as np
 from PIL.PngImagePlugin import PngInfo
-from comfy.cli_args import args
-import folder_paths
-from folder_paths import get_filename_list
+from comfy.cli_args import args # type: ignore
+import folder_paths # type: ignore
+from folder_paths import get_filename_list # type: ignore
 import comfy
 import os
 
@@ -80,13 +80,11 @@ class SaveImageJPGNoMeta(SaveImage):
 
         return output
 
+    CATEGORY = "Suplex"
     RETURN_TYPES = ()
+    FUNCTION = "suplex_save_images"
 
-    FUNCTION = "save_images"
-
-    CATEGORY = "image"
-
-    def save_images(
+    def suplex_save_images(
         self,
         images,
         filename_prefix="ComfyUI",
@@ -113,12 +111,41 @@ class SaveImageJPGNoMeta(SaveImage):
         img.save(os.path.join(full_output_folder, file), quality=quality, optimize=True)
         return {"ui": {"images": results}}
 
+class MultiInputVariableRewrite:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True}),
+            },
+            "optional": {
+                "a": ("STRING", {"forceInput": True}),
+                "b": ("STRING", {"forceInput": True}),
+                "c": ("STRING", {"forceInput": True}),
+                "d": ("STRING", {"forceInput": True}),
+                "e": ("STRING", {"forceInput": True}),
+                # ... add more up to 'z' if needed
+            }
+        }
+   
+    CATEGORY = "Suplex"
+    FUNCTION = "multicombinetext"
+    RETURN_NAMES = ("TEXT",)
+    RETURN_TYPES = ("STRING",)
+
+    def multicombinetext(self, text="", **kwargs):
+        for key, value in kwargs.items():
+            if value:
+                text = text.replace(f"{{{key}}}", value)
+        return (text,)
+
 # Export node
 NODE_CLASS_MAPPINGS = {
     "ControlNet Selector": ControlNetSelector,
     "ControlNetOptionalLoader": ControlNetOptionalLoader,
     "DiffusersSelector": DiffusersSelector,
     "SaveImageJPGNoMeta": SaveImageJPGNoMeta,
+    "MultiInputVariableRewrite": MultiInputVariableRewrite,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -126,4 +153,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ControlNetOptionalLoader": "Load Optional ControlNet Model",
     "DiffusersSelector": "Diffusers Selector",
     "SaveImageJPGNoMeta": "Save Image JPG No Meta",
+    "MultiInputVariableRewrite": "Multi Input Variable Rewrite",
 }
