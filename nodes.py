@@ -22,7 +22,7 @@ class ControlNetSelector:
     RETURN_NAMES = ("control_net_name",)
     FUNCTION = "get_control_net_name"
     
-    CATEGORY = 'Suplex'
+    CATEGORY = 'Uber Comfy'
 
     def get_control_net_name(self, control_net_name):
         return (control_net_name,)
@@ -36,7 +36,7 @@ class ControlNetOptionalLoader:
     RETURN_TYPES = ("CONTROL_NET",)
     FUNCTION = "load_controlnet"
 
-    CATEGORY = "Suplex"
+    CATEGORY = "Uber Comfy"
 
     def load_controlnet(self, control_net_name):
         # Only proceed if a control_net_name is provided and it is not 'None'
@@ -48,7 +48,7 @@ class ControlNetOptionalLoader:
         return (None,)
 
 class DiffusersSelector:
-    CATEGORY = 'Suplex'
+    CATEGORY = 'Uber Comfy'
     RETURN_TYPES = (folder_paths.get_folder_paths("diffusers"), )
     RETURN_NAMES = ("model_path",)
     FUNCTION = "select_model_path"
@@ -80,7 +80,7 @@ class SaveImageJPGNoMeta(SaveImage):
 
         return output
 
-    CATEGORY = "Suplex"
+    CATEGORY = "Uber Comfy"
     RETURN_TYPES = ()
     FUNCTION = "suplex_save_images"
 
@@ -128,7 +128,7 @@ class MultiInputVariableRewrite:
             }
         }
    
-    CATEGORY = "Suplex"
+    CATEGORY = "Uber Comfy"
     FUNCTION = "multicombinetext"
     RETURN_NAMES = ("TEXT",)
     RETURN_TYPES = ("STRING",)
