@@ -1,14 +1,14 @@
 [project]
-name = "suplex_comfy_nodes"
-description = "Misc Nodes: ControlNet Selector Node, Load Optional ControlNet Model"
+name = "uber_comfy_nodes"
+description = "Misc Nodes: ControlNet Selector Node, Load Optional ControlNet Model, Diffusers Selector, Save Image JPG No Meta, Multi Input Variable Rewrite"
 version = "1.0.0"
-license = "LICENSE"
+license = "MIT"
 
 [project.urls]
-Repository = "https://github.com/saftle/suplex_comfy_nodes"
+Repository = "https://github.com/saftle/uber_comfy_nodes"
 #  Used by Comfy Registry https://comfyregistry.org
 
 [tool.comfy]
-PublisherId = ""
-DisplayName = "suplex_comfy_nodes"
+PublisherId = "saftle"
+DisplayName = "uber_comfy_nodes"
 Icon = ""
