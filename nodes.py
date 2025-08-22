@@ -8,6 +8,11 @@ import folder_paths # type: ignore
 from folder_paths import get_filename_list # type: ignore
 import comfy
 import os
+import re
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 class ControlNetSelector:
     @classmethod
@@ -138,6 +143,205 @@ class MultiInputVariableRewrite:
             if value:
                 text = text.replace(f"{{{key}}}", value)
         return (text,)
+    
+class TextRegexOperations:
+    @classmethod
+    def INPUT_TYPES(cls):
+        inputs = {
+            "required": {
+                "text": ("STRING", {"multiline": True, "forceInput": True}),
+                "num_operations": ("INT", {"default": 1, "min": 1, "max": 20, "step": 1}),
+            },
+            "optional": {}
+        }
+        
+        # Create inputs in interleaved order (pattern_1, replacement_1, multiline_1, pattern_2, etc.)
+        for i in range(1, 21):
+            inputs["optional"][f"pattern_{i}"] = ("STRING", {"multiline": True})
+            inputs["optional"][f"replacement_{i}"] = ("STRING", {"multiline": True})
+            inputs["optional"][f"use_multiline_{i}"] = ("BOOLEAN", {"default": True})
+        
+        return inputs
+    
+    RETURN_TYPES = ("STRING",)
+    FUNCTION = "process_text"
+    CATEGORY = "Uber Comfy"
+
+    def process_text(self, text, num_operations, **kwargs):
+        processed_text = text
+        
+        for i in range(1, num_operations + 1):
+            pattern = kwargs.get(f"pattern_{i}", "")
+            replacement = kwargs.get(f"replacement_{i}", "")
+            use_multiline = kwargs.get(f"use_multiline_{i}", True)
+            
+            if pattern:
+                try:
+                    flags = re.MULTILINE if use_multiline else 0
+                    processed_text = re.sub(pattern, replacement, processed_text, flags=flags)
+                except re.error as e:
+                    print(f"Regex error in operation {i}: {str(e)}")
+                    print(f"Pattern: {pattern}")
+        
+        return (processed_text,)
+    
+class VideoSegmentCalculator:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "duration": ("FLOAT", {
+                    "default": 30.0, 
+                    "min": 1.0, 
+                    "max": 3600.0, 
+                    "step": 1.0, 
+                    "tooltip": "Duration of each segment in seconds"
+                }),
+                "frame_rate": ("FLOAT", {
+                    "default": 25.0, 
+                    "min": 1.0, 
+                    "max": 120.0, 
+                    "step": 0.1,
+                    "tooltip": "Frame rate of the video"
+                }),
+                "index": ("INT", {
+                    "default": 0, 
+                    "min": 0, 
+                    "max": 1000, 
+                    "step": 1,
+                    "tooltip": "Current segment index (0-based)"
+                }),
+            },
+            "optional": {
+                "overlap_frames": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 10,
+                    "step": 1,
+                    "tooltip": "Number of frames to overlap between segments"
+                }),
+                "precise_timing": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Use precise decimal timing for audio trimming"
+                }),
+            }
+        }
+    
+    RETURN_TYPES = ("INT", "INT", "FLOAT", "FLOAT", "FLOAT")
+    RETURN_NAMES = ("frame_load_cap", "skip_first_frames", "force_rate", "start_time", "end_time")
+    FUNCTION = "calculate_segment"
+    CATEGORY = "Uber Comfy"
+    
+    def calculate_segment(self, duration, frame_rate, index, overlap_frames=0, precise_timing=True):
+        # Calculate the exact frames for the given duration
+        exact_frames = duration * frame_rate
+        
+        # Calculate the number of frames in each segment (using ceiling to prevent gaps)
+        frames_per_segment = math.ceil(exact_frames)
+        
+        # Calculate skip_first_frames based on index, with optional overlap
+        if index == 0:
+            skip_first_frames = 0
+        else:
+            skip_first_frames = index * frames_per_segment - overlap_frames
+            # Ensure we don't go negative
+            skip_first_frames = max(0, skip_first_frames)
+        
+        # Calculate start and end times based on exact frame positions
+        start_time = skip_first_frames / frame_rate
+        end_time = (skip_first_frames + frames_per_segment) / frame_rate
+        
+        # Round to 2 decimal places for audio timing if needed
+        if not precise_timing:
+            start_time = round(start_time, 2)
+            end_time = round(end_time, 2)
+        
+        return (frames_per_segment, skip_first_frames, frame_rate, start_time, end_time)
+    
+
+class ModelSimilarityNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "base_model":   ("MODEL",),
+            "target_model": ("MODEL",)}
+        }
+
+    RETURN_TYPES  = ("STRING",)
+    RETURN_NAMES  = ("similarity_report",)
+    FUNCTION      = "compare"
+    CATEGORY      = "Uber Comfy"
+
+    # ---------- helpers ----------
+    @staticmethod
+    def _cross(to_q, to_k, to_v, rnd):
+        h, e = to_q.shape
+        lq = nn.Linear(h, e, bias=False); lq.weight.copy_(to_q)
+        lk = nn.Linear(h, e, bias=False); lk.weight.copy_(to_k)
+        lv = nn.Linear(h, e, bias=False); lv.weight.copy_(to_v)
+        return torch.einsum(
+            "ik,jk->ik",
+            torch.softmax(torch.einsum("ij,kj->ik", lq(rnd), lk(rnd)), dim=-1),
+            lv(rnd)
+        )
+
+    @classmethod
+    def _unwrap(cls, obj):
+        if isinstance(obj, dict):               return obj
+        if hasattr(obj, "get_weights"):         return obj.get_weights()
+        if hasattr(obj, "state_dict"):          return obj.state_dict()
+        for a in ("model", "original_model"):
+            if hasattr(obj, a):                 return cls._unwrap(getattr(obj, a))
+        raise TypeError("Cannot unwrap MODEL object")
+
+    # ---------- main ----------
+    def compare(self, base_model, target_model):
+        b_sd = self._unwrap(base_model)
+        t_sd = self._unwrap(target_model)
+        torch.manual_seed(114514)
+
+        rnd, b_attn, sims, common = {}, {}, [], []
+
+        # prefixes to scan: input, middle, output
+        scan = [
+            ("diffusion_model.input_blocks",  5),   # indices 0-4
+            ("diffusion_model.middle_block", 1),    # index   0
+            ("diffusion_model.output_blocks",11),   # indices 0-10
+        ]
+
+        # discover layers present in both models
+        for prefix, max_idx in scan:
+            for i in range(max_idx):
+                key = f"{prefix}.{i}.1.transformer_blocks.0.attn1.to_q.weight"
+                if key in b_sd and key in t_sd:
+                    common.append((prefix, i))
+
+        if not common:
+            return ("No matching attention layers found in both models.",)
+
+        # compute attention outputs for base model
+        for p, i in common:
+            q = b_sd[f"{p}.{i}.1.transformer_blocks.0.attn1.to_q.weight"]
+            k = b_sd[f"{p}.{i}.1.transformer_blocks.0.attn1.to_k.weight"]
+            v = b_sd[f"{p}.{i}.1.transformer_blocks.0.attn1.to_v.weight"]
+            h, e = q.shape
+            key = f"{p}.{i}"
+            rnd[key]   = torch.randn(e, h)
+            b_attn[key] = self._cross(q, k, v, rnd[key])
+
+        # compare with target model
+        for p, i in common:
+            key = f"{p}.{i}"
+            t_attn = self._cross(
+                t_sd[f"{p}.{i}.1.transformer_blocks.0.attn1.to_q.weight"],
+                t_sd[f"{p}.{i}.1.transformer_blocks.0.attn1.to_k.weight"],
+                t_sd[f"{p}.{i}.1.transformer_blocks.0.attn1.to_v.weight"],
+                rnd[key]
+            )
+            sims.append(torch.mean(torch.cosine_similarity(b_attn[key], t_attn)))
+
+        score = torch.mean(torch.stack(sims)) * 100
+        return (f"Similarity: {score:.2f}%  (compared {len(common)} blocks)",)
 
 # Export node
 NODE_CLASS_MAPPINGS = {
@@ -146,6 +350,9 @@ NODE_CLASS_MAPPINGS = {
     "DiffusersSelector": DiffusersSelector,
     "SaveImageJPGNoMeta": SaveImageJPGNoMeta,
     "MultiInputVariableRewrite": MultiInputVariableRewrite,
+    "TextRegexOperations": TextRegexOperations,
+    "VideoSegmentCalculator": VideoSegmentCalculator,
+    "ModelSimilarityNode": ModelSimilarityNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -154,4 +361,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DiffusersSelector": "Diffusers Selector",
     "SaveImageJPGNoMeta": "Save Image JPG No Meta",
     "MultiInputVariableRewrite": "Multi Input Variable Rewrite",
+    "TextRegexOperations": "Text Regex Operations",
+    "VideoSegmentCalculator": "Video Segment Calculator",
+    "ModelSimilarityNode": "Model Similarity Node",
 }
