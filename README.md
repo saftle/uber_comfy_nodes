@@ -85,19 +85,4 @@ Saves all images in the batch as JPG files with the specified quality without wr
 
 ---
 
-## Installation
-
-```bash
-# Preferred: install via Comfy Manager
-# 1. Open Comfy Manager  →  Search "Misc ComfyUI Nodes"  →  Install
-
-# Manual alternative:
-cd ComfyUI
-git clone https://github.com/your-repo/misc-comfy-nodes.git custom_nodes/misc_comfy_nodes
-```
-
-Restart ComfyUI and the nodes will be ready to use.
-
----
-
 *Open an issue or PR if you spot a missing utility—this repo will keep growing as new workflow gaps appear.*
