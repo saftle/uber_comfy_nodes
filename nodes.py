@@ -13,6 +13,11 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import psutil
+import time
+from typing import Any, Dict, List, Tuple, Optional
+from collections import OrderedDict, defaultdict
+import threading
 
 class ControlNetSelector:
     @classmethod
@@ -342,8 +347,463 @@ class ModelSimilarityNode:
 
         score = torch.mean(torch.stack(sims)) * 100
         return (f"Similarity: {score:.2f}%  (compared {len(common)} blocks)",)
+    
+class ModelWeightDumperNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "model": ("MODEL",),
+            "show_shapes": ("BOOLEAN", {"default": True}),
+            "filter_prefix": ("STRING", {"default": ""}),
+        }}
 
-# Export node
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("weight_info",)
+    FUNCTION = "dump_weights"
+    CATEGORY = "Uber Comfy"
+
+    @classmethod
+    def _unwrap(cls, obj):
+        if isinstance(obj, dict):               return obj
+        if hasattr(obj, "get_weights"):         return obj.get_weights()
+        if hasattr(obj, "state_dict"):          return obj.state_dict()
+        for a in ("model", "original_model"):
+            if hasattr(obj, a):                 return cls._unwrap(getattr(obj, a))
+        raise TypeError("Cannot unwrap MODEL object")
+
+    def dump_weights(self, model, show_shapes=True, filter_prefix=""):
+        sd = self._unwrap(model)
+        
+        output_lines = []
+        output_lines.append(f"Total weights: {len(sd)}\n")
+        output_lines.append("="*80 + "\n")
+        
+        # Filter keys if prefix is provided
+        keys = sorted(sd.keys())
+        if filter_prefix:
+            keys = [k for k in keys if k.startswith(filter_prefix)]
+            output_lines.append(f"Filtered by prefix: '{filter_prefix}'\n")
+            output_lines.append(f"Matching weights: {len(keys)}\n")
+            output_lines.append("="*80 + "\n")
+        
+        for key in keys:
+            weight = sd[key]
+            if show_shapes:
+                shape_str = f" → {tuple(weight.shape)}" if hasattr(weight, 'shape') else ""
+                dtype_str = f" ({weight.dtype})" if hasattr(weight, 'dtype') else ""
+                output_lines.append(f"{key}{shape_str}{dtype_str}\n")
+            else:
+                output_lines.append(f"{key}\n")
+        
+        return ("".join(output_lines),)
+    
+class RunwareResolutionCalculator:
+    """ComfyUI node for intelligent resolution calculation with model-specific presets."""
+    
+    PRESETS = {
+        "Nano Banana 2": [
+            # Square formats (1:1)
+            (1024, 1024), (2048, 2048), (4096, 4096),
+            # Landscape 3:2 ratio
+            (1200, 896), (2400, 1792), (4800, 3584),
+            # Portrait 2:3 ratio
+            (896, 1200), (1792, 2400), (3584, 4800),
+            # Landscape 5:4 ratio
+            (1152, 928), (2304, 1856), (4608, 3712),
+            # Portrait 4:5 ratio
+            (928, 1152), (1856, 2304), (3712, 4608),
+            # Landscape 3:2 wider
+            (1264, 848), (2528, 1696), (5056, 3392), (5096, 3392),
+            # Portrait 2:3 taller
+            (848, 1264), (1696, 2528), (3392, 5056), (3392, 5096),
+            # Ultra-wide landscape
+            (1376, 768), (2752, 1536), (5504, 3072),
+            # Ultra-tall portrait
+            (768, 1376), (1536, 2752), (3072, 5504),
+            # Cinematic ultra-wide
+            (1548, 672), (1584, 672), (3168, 1344), (6336, 2688),
+        ],
+    }
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "full_image": ("IMAGE",),
+                "model_preset": (list(cls.PRESETS.keys()), {
+                    "default": "Nano Banana 2"
+                }),
+            },
+            "optional": {
+                "cropped_image": ("IMAGE",),
+                "mask": ("MASK",),
+            }
+        }
+    
+    RETURN_TYPES = ("INT", "INT")
+    RETURN_NAMES = ("width", "height")
+    FUNCTION = "calculate"
+    CATEGORY = "Uber Comfy"
+    
+    def calculate(self, full_image, model_preset, cropped_image=None, mask=None):
+        """Main calculation entry point."""
+        _, full_h, full_w, _ = full_image.shape
+        resolutions = self.PRESETS.get(model_preset, self.PRESETS["Nano Banana 2"])
+        
+        if cropped_image is None or mask is None:
+            return self._direct_resolution_selection(full_w, full_h, resolutions, model_preset)
+        
+        return self._mask_constrained_selection(full_image, mask, resolutions, model_preset)
+    
+    def _direct_resolution_selection(self, img_w, img_h, resolutions, preset_name):
+        """Select resolution using multi-tier filtering and ranking."""
+        print(f"🎯 {preset_name} Optimizer (Direct Resolution Mode)")
+        print(f"   Source dimensions: {img_w}×{img_h}")
+        
+        source_ratio = img_w / img_h
+        source_area = img_w * img_h
+        
+        # Tier 1: Spatial filtering
+        spatial_candidates = [
+            (w, h) for w, h in resolutions 
+            if w <= img_w and h <= img_h
+        ]
+        
+        if not spatial_candidates:
+            print(f"   ⚠️ No candidates within bounds, using 1024x1024")
+            return (1024, 1024)
+        
+        # Tier 2: Aspect ratio bucketing
+        def get_aspect_bucket(ratio):
+            if 0.95 <= ratio <= 1.05:
+                return "square"
+            elif ratio > 1.5:
+                return "wide"
+            elif ratio < 0.67:
+                return "tall"
+            else:
+                return "standard"
+        
+        source_bucket = get_aspect_bucket(source_ratio)
+        
+        # Tier 3: Multi-criteria scoring
+        scored_candidates = []
+        
+        for res_w, res_h in spatial_candidates:
+            res_ratio = res_w / res_h
+            res_area = res_w * res_h
+            res_bucket = get_aspect_bucket(res_ratio)
+            
+            log_ratio_distance = abs(np.log2(source_ratio) - np.log2(res_ratio))
+            aspect_score = 1.0 / (1.0 + log_ratio_distance)
+            
+            utilization = res_area / source_area
+            utilization_score = utilization
+            
+            bucket_bonus = 1.2 if res_bucket == source_bucket else 1.0
+            
+            quality_tier = min(1.0, np.log2(res_area / 1048576) / 2)
+            
+            # Weighted product
+            composite = (
+                (aspect_score ** 2.8) * 
+                (utilization_score ** 1.5) * 
+                bucket_bonus * 
+                (1.0 + quality_tier * 0.3)
+            )
+            
+            scored_candidates.append({
+                'resolution': (res_w, res_h),
+                'score': composite,
+                'aspect_score': aspect_score,
+                'utilization': utilization
+            })
+        
+        # Maximize score
+        best = max(scored_candidates, key=lambda x: x['score'])
+        
+        print(f"   ✓ Selected: {best['resolution'][0]}×{best['resolution'][1]} "
+              f"(aspect: {best['aspect_score']:.3f}, util: {best['utilization']:.3f})")
+        return best['resolution']
+    
+    def _mask_constrained_selection(self, full_image, mask_tensor, resolutions, preset_name):
+        """Select resolution using bi-directional fitting analysis."""
+        print(f"🎯 {preset_name} Optimizer (Mask-Based Mode)")
+        
+        _, full_h, full_w, _ = full_image.shape
+        
+        mask_data = mask_tensor.cpu().numpy()[0]
+        active_pixels = mask_data > 0.5
+        
+        y_coords, x_coords = np.where(active_pixels)
+        
+        if len(y_coords) == 0 or len(x_coords) == 0:
+            return (1024, 1024)
+        
+        roi_x1, roi_x2 = x_coords.min(), x_coords.max()
+        roi_y1, roi_y2 = y_coords.min(), y_coords.max()
+        roi_width = roi_x2 - roi_x1 + 1
+        roi_height = roi_y2 - roi_y1 + 1
+        
+        print(f"   ROI bounds: {roi_width}×{roi_height}")
+        
+        roi_ratio = roi_width / roi_height
+        roi_area = roi_width * roi_height
+        
+        scored_candidates = []
+        
+        for res_w, res_h in resolutions:
+            target_ratio = res_w / res_h
+            
+            # Three fitting strategies
+            fit_a_w = roi_width
+            fit_a_h = int(roi_width / target_ratio)
+            
+            fit_b_h = roi_height
+            fit_b_w = int(roi_height * target_ratio)
+            
+            scale_to_ratio = (target_ratio / roi_ratio) ** 0.5
+            fit_c_w = int(roi_width * scale_to_ratio)
+            fit_c_h = int(roi_height / scale_to_ratio)
+            
+            viable_fits = []
+            
+            for fit_w, fit_h, strategy in [
+                (fit_a_w, fit_a_h, 'width_anchor'),
+                (fit_b_w, fit_b_h, 'height_anchor'),
+                (fit_c_w, fit_c_h, 'proportional')
+            ]:
+                if fit_w <= full_w and fit_h <= full_h:
+                    expansion_w = fit_w - roi_width
+                    expansion_h = fit_h - roi_height
+                    total_expansion = expansion_w + expansion_h
+                    
+                    viable_fits.append({
+                        'width': fit_w,
+                        'height': fit_h,
+                        'expansion': total_expansion,
+                        'strategy': strategy
+                    })
+            
+            if not viable_fits:
+                continue
+            
+            best_fit = min(viable_fits, key=lambda x: x['expansion'])
+            
+            fitted_area = best_fit['width'] * best_fit['height']
+            target_area = res_w * res_h
+            
+            expansion_ratio = fitted_area / roi_area
+            expansion_efficiency = 1.0 / expansion_ratio
+            
+            scale_match = min(fitted_area, target_area) / max(fitted_area, target_area)
+            
+            strategy_weight = 1.1 if best_fit['strategy'] == 'proportional' else 1.0
+            
+            # Harmonic mean
+            harmonic_mean = 3.0 / (
+                (1.0 / expansion_efficiency) + 
+                (1.0 / scale_match) + 
+                (1.0 / strategy_weight)
+            )
+            
+            scored_candidates.append({
+                'resolution': (res_w, res_h),
+                'score': harmonic_mean,
+                'fitted': (best_fit['width'], best_fit['height']),
+                'expansion': expansion_ratio,
+                'strategy': best_fit['strategy']
+            })
+        
+        if not scored_candidates:
+            return (1024, 1024)
+        
+        best = max(scored_candidates, key=lambda x: x['score'])
+        
+        print(f"   Fitted area: {best['fitted'][0]}×{best['fitted'][1]} ({best['strategy']})")
+        print(f"   ✓ Selected: {best['resolution'][0]}×{best['resolution'][1]} "
+              f"(expansion: {best['expansion']:.2f}x)")
+        return best['resolution']
+
+class AdaptiveImageScaler:
+    """Intelligent image scaling with optional ML-based upscaling and dimension constraints."""
+    
+    INTERPOLATION_MODES = [
+        "lanczos", "bicubic", "bilinear", "area", "nearest-exact"
+    ]
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "target_width": ("INT",),
+                "target_height": ("INT",),
+                "interpolation": (cls.INTERPOLATION_MODES,),
+                "dimension_alignment": ("INT", {
+                    "default": 0, "min": 0, "max": 256, "step": 1
+                }),
+            },
+            "optional": {
+                "upscale_model": ("UPSCALE_MODEL",),
+            }
+        }
+    
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "process"
+    CATEGORY = "Uber Comfy"
+    
+    MODEL_ENGAGEMENT_THRESHOLD = 1.08
+    TILE_REDUCTION_FACTOR = 0.75
+    MIN_SAFE_TILE_SIZE = 128
+    
+    def process(self, image, target_width, target_height, interpolation, 
+                dimension_alignment, upscale_model=None):
+        """Main processing pipeline."""
+        import comfy.utils
+        from comfy import model_management
+        
+        batch_size, source_h, source_w, channels = image.shape
+        
+        if dimension_alignment > 0:
+            target_width = (target_width // dimension_alignment) * dimension_alignment
+            target_height = (target_height // dimension_alignment) * dimension_alignment
+        
+        scale_w = target_width / source_w
+        scale_h = target_height / source_h
+        geometric_mean_scale = (scale_w * scale_h) ** 0.5
+        
+        print(f"🖼️  Adaptive Scaler: {source_w}×{source_h}×{channels} → {target_width}×{target_height}")
+        print(f"    Scale: {geometric_mean_scale:.3f}x (w:{scale_w:.2f}, h:{scale_h:.2f}) | {interpolation}")
+        
+        use_ml_model = (
+            geometric_mean_scale > self.MODEL_ENGAGEMENT_THRESHOLD and 
+            upscale_model is not None
+        )
+        
+        if use_ml_model:
+            return self._ml_assisted_pipeline(
+                image, target_width, target_height, interpolation, channels,
+                upscale_model, comfy, model_management
+            )
+        else:
+            return self._standard_interpolation_pipeline(
+                image, target_width, target_height, interpolation, 
+                geometric_mean_scale, comfy
+            )
+    
+    def _ml_assisted_pipeline(self, image, target_w, target_h, interpolation, 
+                              channels, model, comfy, model_mgmt):
+        """ML-based upscaling with synchronized alpha processing."""
+        print(f"    ⚡ ML upscaling engaged")
+        
+        has_alpha = (channels == 4)
+        
+        if has_alpha:
+            print(f"    💎 Alpha channel: synchronized processing")
+            rgb_channels = image[:, :, :, :3]
+            alpha_channel = image[:, :, :, 3:4]
+        else:
+            rgb_channels = image
+            alpha_channel = None
+        
+        device = model_mgmt.get_torch_device()
+        model.to(device)
+        
+        rgb_gpu = rgb_channels.movedim(-1, -3).to(device)
+        
+        upscaled_rgb = self._progressive_tiled_upscale(
+            rgb_gpu, model, comfy, model_mgmt
+        )
+        
+        model.cpu()
+        
+        upscaled_rgb = torch.clamp(upscaled_rgb.movedim(-3, -1), 0.0, 1.0)
+        
+        upscaled_rgb = upscaled_rgb.movedim(-1, 1)
+        upscaled_rgb = comfy.utils.common_upscale(
+            upscaled_rgb, target_w, target_h, interpolation, "disabled"
+        )
+        upscaled_rgb = upscaled_rgb.movedim(1, -1)
+        
+        if has_alpha:
+            # Bicubic for quality
+            alpha_scaled = self._scale_alpha_channel(
+                alpha_channel, target_w, target_h, use_bicubic=True
+            )
+            result = torch.cat([upscaled_rgb, alpha_scaled], dim=-1)
+            print(f"    💎 Alpha reconstructed with bicubic interpolation")
+        else:
+            result = upscaled_rgb
+        
+        return (result,)
+    
+    def _progressive_tiled_upscale(self, tensor, model, comfy, model_mgmt):
+        """Progressive tile reduction (0.75x vs 0.5x)."""
+        current_tile = 512
+        overlap = 32
+        
+        while True:
+            try:
+                steps = tensor.shape[0] * comfy.utils.get_tiled_scale_steps(
+                    tensor.shape[3], tensor.shape[2],
+                    tile_x=current_tile, tile_y=current_tile, overlap=overlap
+                )
+                
+                pbar = comfy.utils.ProgressBar(steps)
+                
+                result = comfy.utils.tiled_scale(
+                    tensor,
+                    lambda t: model(t),
+                    tile_x=current_tile, tile_y=current_tile,
+                    overlap=overlap,
+                    upscale_amount=model.scale,
+                    pbar=pbar
+                )
+                
+                return result
+                
+            except model_mgmt.OOM_EXCEPTION as e:
+                new_tile = int(current_tile * self.TILE_REDUCTION_FACTOR)
+                
+                if new_tile < self.MIN_SAFE_TILE_SIZE:
+                    print(f"    ❌ Tile size below safe threshold ({self.MIN_SAFE_TILE_SIZE}px)")
+                    raise e
+                
+                print(f"    ⚠️  Memory limit reached, reducing tile: {current_tile}→{new_tile}px")
+                current_tile = new_tile
+    
+    def _scale_alpha_channel(self, alpha, target_w, target_h, use_bicubic=True):
+        """Scale alpha using squeeze/unsqueeze (different from permute)."""
+        alpha_reshaped = alpha.squeeze(-1).unsqueeze(1)
+        
+        mode = 'bicubic' if use_bicubic else 'bilinear'
+        
+        alpha_scaled = F.interpolate(
+            alpha_reshaped,
+            size=(target_h, target_w),
+            mode=mode,
+            align_corners=False if mode == 'bilinear' else None
+        )
+        
+        alpha_result = alpha_scaled.squeeze(1).unsqueeze(-1)
+        
+        return alpha_result
+    
+    def _standard_interpolation_pipeline(self, image, target_w, target_h, 
+                                          method, scale, comfy):
+        """Direct interpolation with integrated channels."""
+        direction = "⬇️ downscale" if scale < 1.0 else "⬆️ upscale"
+        print(f"    {direction} via {method} interpolation")
+        
+        tensor_bchw = image.movedim(-1, 1)
+        scaled_bchw = comfy.utils.common_upscale(
+            tensor_bchw, target_w, target_h, method, "disabled"
+        )
+        result = scaled_bchw.movedim(1, -1)
+        
+        return (result,)
+
 NODE_CLASS_MAPPINGS = {
     "ControlNet Selector": ControlNetSelector,
     "ControlNetOptionalLoader": ControlNetOptionalLoader,
@@ -353,6 +813,10 @@ NODE_CLASS_MAPPINGS = {
     "TextRegexOperations": TextRegexOperations,
     "VideoSegmentCalculator": VideoSegmentCalculator,
     "ModelSimilarityNode": ModelSimilarityNode,
+    "ModelWeightDumperNode": ModelWeightDumperNode,
+    "RunwareResolutionCalculator": RunwareResolutionCalculator,
+    "AdaptiveImageScaler": AdaptiveImageScaler,
+
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -364,4 +828,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TextRegexOperations": "Text Regex Operations",
     "VideoSegmentCalculator": "Video Segment Calculator",
     "ModelSimilarityNode": "Model Similarity Node",
+    "ModelWeightDumperNode": "Model Weight Dumper",
+    "RunwareResolutionCalculator": "Runware Resolution Calculator",
+    "AdaptiveImageScaler": "Adaptive Image Scaler",
 }
